@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
         self.mail.disconnected.connect(self.clear_mail_results)
         self.mail.reconnected.connect(self.clear_mail_results)
         self.mail.finished.connect(self.on_mail_finished)
+        self.mail.started.connect(self.update_daily_buttons)
         self.mail.started.connect(self.update_office)
         self.briefing_worker: CalendarRefresh | None = None
         self.briefing_snapshot: CalendarDay | None = None
@@ -507,10 +508,10 @@ class MainWindow(QMainWindow):
     def update_daily_buttons(self) -> None:
         action = self.selected_daily_action()
         idle = self.daily_worker is None
-        self.daily_refresh.setEnabled(idle)
+        self.daily_refresh.setEnabled(idle and not self.mail.busy)
         self.daily_add.setEnabled(idle and action is not None and not action.review and not action.status
                                   and self.store is not None)
-        self.daily_source.setEnabled(idle and action is not None)
+        self.daily_source.setEnabled(idle and not self.mail.busy and action is not None)
         self.daily_evidence.setEnabled(idle and action is not None)
 
     def open_daily_source(self) -> None:
@@ -546,6 +547,13 @@ class MainWindow(QMainWindow):
             if chat is not None:
                 self.show_reply(chat[0], Reply("The Daily Brief is refreshing. Try again when it finishes.", "focused"))
             return
+        if self.mail.busy:
+            note = "Gmail is busy. Try the Daily Brief again once the request finishes."
+            if chat is not None:
+                self.show_reply(chat[0], Reply(note, "focused"))
+            else:
+                self.daily_status.setText(note)
+            return
         now = datetime.now(self.calendar.zone)
         scan = self.daily_scan
         fresh = (scan is not None and not self.daily_error and scan.day == now.date()
@@ -572,6 +580,7 @@ class MainWindow(QMainWindow):
             for control in (self.mode, self.entry, self.send_button, self.clear_button):
                 control.setEnabled(False)
         self.daily_status.setText("Refreshing Daily Brief…")
+        self.mail.set_brief_busy(True)
         self.update_daily_buttons()
         self.daily_worker.finished.connect(self.finish_daily_brief)
         self.daily_worker.start()
@@ -584,6 +593,7 @@ class MainWindow(QMainWindow):
         if worker is None:
             return
         worker.deleteLater()
+        self.mail.set_brief_busy(False)
         if self.quitting:
             self.close()
             return
@@ -776,7 +786,7 @@ class MainWindow(QMainWindow):
         due = None if tasks is None else sum(is_due(task, today) for task in tasks)
         ui.set_copy("due", "今日到期" if due is None else f"今日到期 · {due}")
         mail_connected = self.mail.reader.token.is_file()
-        mail_state = ("更新中" if self.mail.worker else "未連線" if not mail_connected else
+        mail_state = ("更新中" if self.mail.busy else "未連線" if not mail_connected else
                       "需重新連線" if self.mail.needs_reconnect else "已授權")
         ui.set_copy("mail_status", f"Gmail\n{mail_state}")
         scan = self.daily_scan if mail_connected else None
@@ -997,6 +1007,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def on_mail_finished(self) -> None:
+        self.update_daily_buttons()
         if self.quitting:
             self.close()
         else:

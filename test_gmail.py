@@ -1,9 +1,11 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -290,8 +292,118 @@ class GmailAuthorizationTests(unittest.TestCase):
             self.assertEqual(reader.credentials(False).scopes, [SCOPE])
             self.assertEqual(calendar_token.read_text(), "calendar fixture")
 
+    def test_gmail_reconnect_runs_after_an_in_flight_read(self):
+        from calendar_reader import TOKEN_URI
+        from google.oauth2.credentials import Credentials
+
+        def credentials_for(account):
+            return Credentials(account, refresh_token=account, token_uri=TOKEN_URI,
+                               client_id="fixture", client_secret="fixture", scopes=[SCOPE])
+
+        with TemporaryDirectory() as directory, ThreadPoolExecutor(max_workers=2) as pool:
+            reader = GmailReader(Path(directory))
+            old, new = credentials_for("old-fixture"), credentials_for("new-fixture")
+            reader.token.write_text(old.to_json())
+            started, release, reconnecting = Event(), Event(), Event()
+
+            def read(_):
+                started.set()
+                self.assertTrue(release.wait(5))
+                reader.thread_cache["fixture"] = ((), ())
+
+            def reconnect():
+                reconnecting.set()
+                reader._use(lambda _: None, connect=True)
+
+            with patch.object(reader, "credentials", side_effect=lambda connect: new if connect else old), patch(
+                "gmail_reader.AuthorizedSession", return_value=Inbox()
+            ):
+                scan = pool.submit(reader._use, read)
+                try:
+                    self.assertTrue(started.wait(2))
+                    login = pool.submit(reconnect)
+                    self.assertTrue(reconnecting.wait(2))
+                    with self.assertRaises(TimeoutError):
+                        login.result(timeout=0.2)
+                finally:
+                    release.set()
+                scan.result(timeout=5)
+                login.result(timeout=5)
+            self.assertEqual(reader.credentials(False).refresh_token, "new-fixture")
+            self.assertEqual(reader.thread_cache, {})
+
 
 class GmailWindowTests(unittest.TestCase):
+    def test_daily_brief_and_reconnect_do_not_overlap(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from calendar_reader import CalendarError
+        from chihaya import MainWindow
+        from gmail_reader import MailResult
+        from mail_actions import MailAction, MailScan
+
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        scan_started, release_scan, login_started, release_login = (Event() for _ in range(4))
+
+        def wait_for(done):
+            for _ in range(250):
+                if done():
+                    return
+                QTest.qWait(10)
+            self.fail("Background operation did not finish")
+
+        def scan(now, zone, **kwargs):
+            scan_started.set()
+            if not release_scan.wait(5):
+                raise GmailError("Fixture scan timed out.")
+            action = MailAction("fixture", "reply", "Fixture Sender", "Old account message", now, "Please reply.")
+            return MailScan(now.date(), 1, False, (action,), now, checked=1)
+
+        def read(search, zone, *, connect=False):
+            login_started.set()
+            if not release_login.wait(5):
+                raise GmailError("Fixture login timed out.")
+            return MailResult(search, (), False)
+
+        with TemporaryDirectory() as directory:
+            window = MainWindow(Path(directory) / "portraits")
+            mail = window.mail
+            mail.reader.token.touch()
+            with patch.object(mail.reader, "scan_actions", side_effect=scan) as scanner, patch.object(
+                mail.reader, "read", side_effect=read
+            ) as reader, patch.object(window.calendar.reader, "read", side_effect=CalendarError("Fixture unavailable.")):
+                try:
+                    window.entry.setText("give me a daily brief")
+                    window.send()
+                    wait_for(scan_started.is_set)
+                    self.assertFalse(mail.connect_button.isEnabled())
+                    self.assertFalse(mail.remove_button.isEnabled())
+                    self.assertFalse(mail.refresh(connect=True))
+                    mail.disconnect()
+                    self.assertTrue(mail.reader.token.is_file())
+                    reader.assert_not_called()
+                    release_scan.set()
+                    wait_for(lambda: window.daily_worker is None)
+                    self.assertIn("Old account message", window.history.toPlainText())
+                    self.assertTrue(mail.connect_button.isEnabled())
+
+                    self.assertTrue(mail.refresh(connect=True))
+                    wait_for(login_started.is_set)
+                    self.assertFalse(window.daily_refresh.isEnabled())
+                    window.start_daily_brief()
+                    self.assertIsNone(window.daily_worker)
+                    scanner.assert_called_once()
+                    release_login.set()
+                    wait_for(lambda: mail.worker is None)
+                    self.assertIsNone(window.daily_scan)
+                    self.assertNotIn("Old account message", window.history.toPlainText())
+                    self.assertTrue(window.daily_refresh.isEnabled())
+                finally:
+                    release_scan.set()
+                    release_login.set()
+                    wait_for(lambda: window.daily_worker is None and mail.worker is None)
+                    window.quit_app()
+
     def test_daily_brief_languages_read_request_and_import(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from calendar_reader import CalendarDay, Event

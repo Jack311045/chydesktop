@@ -138,6 +138,8 @@ Chat resolves dates such as `明天`, `11/23` (current local year), and `2026-11
 
 **Verification:** 25 Windows tests passed, including local-day filtering across New York's daylight-saving transition, the ten-message limit, preview without a write, distinct empty and failed refresh states, and no mail data in a later mocked Claude request. The original and relocated portable builds passed Windows UI Automation for the Mail controls and disconnected Chat response. Live Gmail and Calendar authorization were not tested.
 
+Gmail reconnect, disconnect, and mail refresh are unavailable while Daily Brief is scanning. Wait for the scan to finish before switching accounts. A successful reconnect clears the previous account's mail preview, cached brief results, and locally displayed Gmail replies in Chat.
+
 ## Daily Brief
 
 - Open **Today → Refresh Daily Brief** to combine open tasks, calendar openings, and **Mail to follow up**. The app considers up to 100 unique inbox threads from seven local days and checks up to 30 for meaning, including read mail. It reserves capacity for a broad inbox search and for higher-signal results. Scan details distinguish search exhaustion, budget limits, partial results, and stale data. **Review** flags a plausible obligation whose next action or date is unclear. The scan is not a complete inbox audit.

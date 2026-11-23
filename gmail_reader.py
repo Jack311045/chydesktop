@@ -5,6 +5,7 @@ from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
+from threading import Lock
 from typing import Callable, TypeVar
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -100,6 +101,7 @@ class GmailReader:
     def __init__(self, data_dir: Path) -> None:
         self.client = data_dir / "google_calendar_client.json"
         self.token = data_dir / "gmail_token.json"
+        self._request_lock = Lock()
         self.thread_cache: dict[str, tuple[tuple, tuple[MailAction, ...]]] = {}
 
     def credentials(self, connect: bool) -> Credentials:
@@ -137,13 +139,16 @@ class GmailReader:
 
     def _use(self, operation: Callable[[AuthorizedSession], T], *, connect: bool = False) -> T:
         try:
-            creds = self.credentials(connect)
-            with AuthorizedSession(creds, refresh_timeout=TIMEOUT, max_refresh_attempts=1) as session:
-                result = operation(session)
-            # Do not recreate authorization removed during an in-flight read.
-            if connect or (creds.refresh_token and self.token.is_file()):
-                atomic_json(self.token, creds.to_json(), service="Gmail")
-            return result
+            with self._request_lock:
+                creds = self.credentials(connect)
+                with AuthorizedSession(creds, refresh_timeout=TIMEOUT, max_refresh_attempts=1) as session:
+                    result = operation(session)
+                # Do not recreate authorization removed during an in-flight read.
+                if connect or (creds.refresh_token and self.token.is_file()):
+                    atomic_json(self.token, creds.to_json(), service="Gmail")
+                if connect:
+                    self.thread_cache.clear()
+                return result
         except RefreshError as error:
             if error.retryable:
                 raise GmailError("Gmail authorization could not refresh. Try again.") from None

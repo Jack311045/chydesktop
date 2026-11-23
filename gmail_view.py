@@ -52,6 +52,7 @@ class MailView(QGroupBox):
         super().__init__("Mail")
         self.reader, self.zone, self.settings = reader, zone, settings
         self.worker: MailWorker | None = None
+        self._brief_busy = False
         self.result: MailResult | None = None
         self.needs_reconnect = False
         self.had_token = reader.token.is_file()
@@ -101,9 +102,17 @@ class MailView(QGroupBox):
         self.rows.currentRowChanged.connect(self.open_preview)
         self.update_controls()
 
+    @property
+    def busy(self) -> bool:
+        return self.worker is not None or self._brief_busy
+
+    def set_brief_busy(self, busy: bool) -> None:
+        self._brief_busy = busy
+        self.update_controls()
+
     def update_controls(self) -> None:
         connected = self.reader.token.is_file()
-        idle = self.worker is None
+        idle = not self.busy
         self.connect_button.setText("Reconnect Gmail" if connected or self.needs_reconnect else "Connect Gmail")
         self.connect_button.setEnabled(idle)
         self.refresh_button.setEnabled(idle and connected and not self.needs_reconnect)
@@ -118,7 +127,7 @@ class MailView(QGroupBox):
         self.preview.clear()
 
     def check_connection(self) -> None:
-        if self.worker is not None:
+        if self.busy:
             return
         connected = self.reader.token.is_file()
         if self.had_token and not connected:
@@ -133,7 +142,7 @@ class MailView(QGroupBox):
         self.update_controls()
 
     def disconnect(self) -> None:
-        if self.worker is not None:
+        if self.busy:
             return
         try:
             self.reader.token.unlink(missing_ok=True)
@@ -165,7 +174,7 @@ class MailView(QGroupBox):
         return MailSearch(day, job_keywords(self.keywords.text()) if kind == "jobs" else ())
 
     def refresh(self, *, connect: bool = False, chat: str = "", kind: str = "") -> bool:
-        if self.worker is not None:
+        if self.busy:
             if chat:
                 self.chat_ready.emit(chat, "Gmail is busy. Try again once this request finishes.", False)
             return False
@@ -192,12 +201,12 @@ class MailView(QGroupBox):
         return True
 
     def open_preview(self, index: int) -> None:
-        if self.worker is not None or self.result is None or not 0 <= index < len(self.result.rows):
+        if self.busy or self.result is None or not 0 <= index < len(self.result.rows):
             return
         self.preview_message(self.result.rows[index].id)
 
     def preview_message(self, message_id: str) -> None:
-        if self.worker is not None or not self.reader.token.is_file():
+        if self.busy or not self.reader.token.is_file():
             self.preview.setPlainText("Gmail is busy or disconnected. Try again after connecting or refreshing.")
             return
         self.preview.setPlainText("Loading message preview…")
