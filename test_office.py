@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -37,23 +37,20 @@ class OfficeTests(unittest.TestCase):
         win.calendar.day.setDate(yesterday)
         for key, target, focus, nav in (
             ("clock", win.today, win.calendar.day, "today"),
-            ("calendar_status", win.today, win.calendar.connect_button, "today"),
-            ("mail_status", win.today, win.mail.connect_button, "mail"),
-            ("today_status", win.today, win.daily_refresh, "today"),
+            ("calendar_status", win.settings_page, win.calendar.connect_button, "settings"),
+            ("mail_status", win.settings_page, win.mail.connect_button, "settings"),
+            ("today_status", win.today, win.brief_links, "today"),
             ("board", win.today, win.calendar.day, "today"),
-            ("board_hint", win.today, win.calendar.day, "today"),
-            ("character", win.chat_page, win.entry, "chat"),
-            ("chat_hint", win.chat_page, win.entry, "chat"),
-            ("monitor", win.today, win.mail.connect_button, "mail"),
-            ("mail_hint", win.today, win.mail.connect_button, "mail"),
+            ("character", win.office, win.entry, "office"),
+            ("monitor", win.mail_page, win.mail.filter, "mail"),
             ("event", win.today, win.calendar.day, "today"),
-            ("task", win.tasks, win.tasks.list, "tasks"),
-            ("opening", win.today, win.daily_refresh, "today"),
-            ("brief", win.today, win.daily_refresh, "today"),
+            ("task", win.tasks, win.tasks.new_button, "tasks"),
+            ("opening", win.today, win.brief_links, "today"),
+            ("brief", win.today, win.brief_links, "today"),
             ("due", win.today, win.today.due_list, "today"),
-            ("unread", win.today, win.mail.connect_button, "mail"),
-            ("follow", win.today, win.daily_rows, "today"),
-            ("resume", win.chat_page, win.entry, "chat"),
+            ("unread", win.mail_page, win.mail.filter, "mail"),
+            ("follow", win.mail_page, win.daily_rows, "mail"),
+            ("resume", win.office, win.entry, "office"),
             ("schedule", win.today, win.calendar.day, "today"),
         ):
             with self.subTest(key=key):
@@ -63,17 +60,21 @@ class OfficeTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertIs(win.tabs.currentWidget(), target)
                 self.assertTrue(focus.hasFocus())
-                self.assertEqual([route for route, item in win.nav_buttons.items() if item.isChecked()], [nav])
+                if target is win.office:
+                    self.assertTrue(win.conversation.isVisible())
+                self.assertEqual([route for route, item in win.nav_buttons.items() if item.property("current")], [nav])
                 QTest.keyClick(focus, Qt.Key.Key_Escape)
                 self.app.processEvents()
                 self.assertIs(win.tabs.currentWidget(), win.office)
                 self.assertTrue(button.hasFocus())
         self.assertNotEqual(win.calendar.day.date(), yesterday)
-        for key, target in (("today", win.today), ("tasks", win.tasks), ("chat", win.chat_page),
-                            ("mail", win.today), ("office", win.office)):
+        self.assertEqual(win.tabs.count(), 5)
+        for key, target in (("today", win.today), ("tasks", win.tasks), ("settings", win.settings_page),
+                            ("mail", win.mail_page), ("office", win.office)):
             QTest.mouseClick(win.nav_buttons[key], Qt.MouseButton.LeftButton)
             self.assertIs(win.tabs.currentWidget(), target)
-            self.assertTrue(win.nav_buttons[key].isChecked())
+            self.assertTrue(win.nav_buttons[key].property("current"))
+            self.assertEqual(win.nav_buttons[key].accessibleDescription(), "当前页面")
         self.assertEqual(win.entry.text(), "A saved draft")
         self.assertEqual(win.history.toPlainText(), history)
         self.assertEqual(win.store.open_tasks(), [])
@@ -103,6 +104,44 @@ class OfficeTests(unittest.TestCase):
                 self.assertNotEqual(image.pixelColor(round((x + 570 * scale) * dpr),
                                                      round((y + 428 * scale) * dpr)), QColor(color))
 
+    def test_labels_are_gone_and_character_hotspot_follows_her_silhouette(self):
+        win = self.window
+        win.resize(1100, 680)
+        self.app.processEvents()
+        office = win.office
+        for removed in ("board_hint", "chat_hint"):
+            self.assertNotIn(removed, office.buttons)
+        for key in ("monitor", "board", "character"):
+            self.assertEqual(office.buttons[key].text(), "")
+            self.assertEqual(office.buttons[key].toolTip(), "")
+            self.assertTrue(office.buttons[key].accessibleName())
+        win.update_office()
+        self.assertNotIn("千早桌面助手", office.buttons["clock"].text())
+        self.assertRegex(office.buttons["clock"].text(), r"^\d{4}-\d{2}-\d{2}  周.  \d{2}:\d{2}$")
+        button = office.buttons["character"]
+        mask = button.mask()
+        self.assertFalse(office.silhouette.isEmpty())
+        self.assertFalse(mask.isEmpty())
+        self.assertTrue(mask.contains(button.rect().center()))
+        self.assertFalse(mask.contains(QPoint(0, 0)))
+        self.assertIsNot(office.childAt(button.geometry().topLeft() + QPoint(1, 1)), button)
+        plain = office.grab().toImage()
+        with patch.object(type(button), "active", lambda self: True):
+            office.update()
+            outlined = office.grab().toImage()
+        self.assertNotEqual(plain, outlined)
+        left = office.grab().toImage()
+        self.assertEqual(plain, left)
+
+    def test_screenshot_task_requires_separate_confirmation(self):
+        win = self.window
+        win.stage_screenshot_task("Review application")
+        self.assertIn("Review application", win.history.toPlainText())
+        self.assertEqual(win.store.open_tasks(), [])
+        win.entry.setText("确认")
+        win.send()
+        self.assertEqual([task.title for task in win.store.open_tasks()], ["Review application"])
+
     def test_calendar_and_due_cards_use_local_data_without_writes(self):
         win = self.window
         zone = win.calendar.zone
@@ -113,9 +152,11 @@ class OfficeTests(unittest.TestCase):
         with patch("chihaya.datetime") as clock:
             clock.now.return_value = now
             win.update_office()
-            self.assertIn("尚未連線", win.office.buttons["event"].text())
-            self.assertIn("本機待辦", win.office.buttons["task"].text())
-            self.assertIn("未連線", win.office.buttons["mail_status"].text())
+            self.assertIn("尚未连接", win.office.buttons["event"].text())
+            self.assertIn("本机待办", win.office.buttons["task"].text())
+            self.assertIn("未连接", win.office.buttons["mail_status"].text())
+            self.assertIn("未连接", win.office.buttons["monitor"].accessibleName())
+            self.assertEqual(win.office.buttons["monitor"].text(), "")
             win.office.buttons["due"].click()
             self.assertEqual(win.today.due_list.count(), 1)
             self.assertEqual(win.today.due_list.item(0).data(Qt.ItemDataRole.UserRole), due)
@@ -125,12 +166,12 @@ class OfficeTests(unittest.TestCase):
             meeting = Event("Fixture", "Upcoming event", now + timedelta(hours=1),
                             now + timedelta(hours=2), False, True)
             for snapshot, failure, expected in (
-                (None, "", "尚未載入"),
-                (None, "failed", "讀取失敗"),
+                (None, "", "尚未载入"),
+                (None, "failed", "读取失败"),
                 (CalendarDay(today, zone, (), (), ("Fixture",), now), "", "只取得部分行程"),
-                (CalendarDay(today, zone, (), (), (), now - timedelta(days=1)), "", "資料已過期"),
-                (CalendarDay(today, zone, (), (), (), now, ("different",)), "", "資料已過期"),
-                (CalendarDay(today, zone, (), (), (), now), "", "今日無行程"),
+                (CalendarDay(today, zone, (), (), (), now - timedelta(days=1)), "", "数据已过期"),
+                (CalendarDay(today, zone, (), (), (), now, ("different",)), "", "数据已过期"),
+                (CalendarDay(today, zone, (), (), (), now), "", "今日无行程"),
                 (CalendarDay(today, zone, (), (meeting,), (), now), "", "Upcoming event"),
             ):
                 win.briefing_snapshot, win.briefing_status = snapshot, failure
@@ -152,4 +193,4 @@ class OfficeTests(unittest.TestCase):
             win.today.start.setText("10:00")
             win.today.end.setText("11:00")
             win.update_briefing()
-            self.assertIn("無空檔", win.office.buttons["opening"].text())
+            self.assertIn("无空档", win.office.buttons["opening"].text())

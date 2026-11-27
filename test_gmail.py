@@ -126,10 +126,10 @@ class GmailReaderTests(unittest.TestCase):
         from requests import ConnectionError
 
         self.inbox.failure = (403, ["insufficientPermissions"])
-        with self.assertRaisesRegex(ReconnectGmail, "Reconnect Gmail"):
+        with self.assertRaisesRegex(ReconnectGmail, "重新连接 Gmail"):
             self.reader.read(MailSearch(), self.inbox.zone)
         with patch.object(self.inbox, "get", side_effect=ConnectionError("private response")):
-            with self.assertRaisesRegex(GmailError, "Could not reach Gmail") as error:
+            with self.assertRaisesRegex(GmailError, "无法连接到 Gmail") as error:
                 self.reader.read(MailSearch(), self.inbox.zone)
         self.assertNotIn("private response", str(error.exception))
 
@@ -507,14 +507,14 @@ class GmailWindowTests(unittest.TestCase):
                         ("有哪些信要回？", "待跟進郵件", "確認可面試時間"),
                         ("有哪些邮件要回？", "待跟进邮件", "确认可面试时间"),
                     )
-                    for mode, case in ((mode, case) for mode in ("Offline", "Claude") for case in commands):
+                    for mode, case in ((mode, case) for mode in ("离线", "Claude") for case in commands):
                         command, title, label = case
                         window.mode.setCurrentText(mode)
                         with self.subTest(command=command, mode=mode):
                             window.entry.setText(command)
                             window.send()
                             wait_for(lambda: window.daily_worker is None)
-                            reply = window.history.toPlainText().rsplit("\nChihaya: ", 1)[-1]
+                            reply = window.history.toPlainText().rsplit("\n千早：", 1)[-1]
                             self.assertIn(title, reply)
                             self.assertIn(label, reply)
                             self.assertIn("2026-11-20 17:00", reply)
@@ -526,16 +526,22 @@ class GmailWindowTests(unittest.TestCase):
                             self.assertEqual([(item.message_id, item.review) for item in window.daily_items],
                                              [("assessment", False), ("interview", False), ("question", True)])
                             window.navigate("office")
-                            self.assertIn("待回覆 · 2", window.office.buttons["follow"].text())
+                            self.assertIn("待回复 · 2", window.office.buttons["follow"].text())
                             window.office.buttons["follow"].click()
                             self.assertEqual(window.daily_rows.count(), 2)
                             self.assertIn("Private interview", window.daily_rows.item(1).text())
+                            window.navigate("brief")
+                            link = next(window.brief_links.item(index) for index in range(window.brief_links.count())
+                                        if "Private interview" in window.brief_links.item(index).text())
+                            window.open_brief_link(link)
+                            self.assertIs(window.tabs.currentWidget(), window.mail_page)
+                            self.assertEqual(window.selected_daily_action().message_id, "interview")
                             self.assertEqual(window.review_rows.count(), 1)
                     self.assertEqual(sum(url.endswith("/threads") for url, _ in calls), 2)
                     self.assertFalse(payloads)
                     window.entry.setText("I have one hour, what should I do?")
                     window.send()
-                    self.assertIn("Local planned work", window.history.toPlainText().rsplit("\nChihaya: ", 1)[-1])
+                    self.assertIn("Local planned work", window.history.toPlainText().rsplit("\n千早：", 1)[-1])
                     self.assertFalse(payloads)
                     window.daily_rows.setCurrentRow(0)
                     window.daily_add.click()
@@ -547,6 +553,19 @@ class GmailWindowTests(unittest.TestCase):
                     self.assertEqual(window.mail.preview.toPlainText(), mails["assessment"][1])
                     self.assertFalse(mails["interview"][2])
                     self.assertTrue(mails["newsletter"][2])
+                    window.daily_rows.setCurrentRow(1)
+                    self.assertEqual(window.selected_daily_action().message_id, "interview")
+                    window.daily_done.click()
+                    self.assertEqual([item.message_id for item in window.daily_items if not item.review], ["assessment"])
+                    self.assertEqual(window.daily_rows.count(), 1)
+                    self.assertEqual(window.hidden_mail, 1)
+                    self.assertIn("待回复 · 1", window.office.buttons["follow"].text())
+                    self.assertEqual(len(store.open_tasks()), 2)
+                    self.assertEqual(len(store.dismissed_mail()), 1)
+                    window.restore_daily_done()
+                    self.assertEqual(window.daily_rows.count(), 2)
+                    self.assertEqual(window.hidden_mail, 0)
+                    self.assertFalse(store.dismissed_mail())
                     window.entry.setText("Plan my day from 10:00 to 15:00")
                     window.send()
                     wait_for(lambda: window.request is None)
@@ -606,7 +625,7 @@ class GmailWindowTests(unittest.TestCase):
                     mail = window.mail
                     self.assertEqual(mail.rows.count(), 2)
                     self.assertIn("Interview invitation", mail.rows.item(0).text())
-                    self.assertIn("Refreshed", mail.status.text())
+                    self.assertIn("更新于", mail.status.text())
                     mail.rows.setCurrentRow(0)
                     wait_for(lambda: mail.worker is None)
                     self.assertEqual(mail.preview.toPlainText(), "面試 — private preview")
@@ -614,13 +633,13 @@ class GmailWindowTests(unittest.TestCase):
                     inbox.failure = (503, [])
                     mail.refresh_button.click()
                     wait_for(lambda: mail.worker is None)
-                    self.assertIn("Stale results", mail.status.text())
+                    self.assertIn("显示的是先前结果", mail.status.text())
                     self.assertEqual(mail.rows.count(), 2)
                     inbox.failure = None
                     clock.now.return_value = now + timedelta(days=2)
                     mail.refresh_button.click()
                     wait_for(lambda: mail.worker is None)
-                    self.assertIn("No matching messages.", mail.status.text())
+                    self.assertIn("没有符合的邮件", mail.status.text())
                     self.assertEqual(mail.rows.count(), 0)
                     clock.now.return_value = now
                     window.tabs.setCurrentIndex(0)

@@ -5,7 +5,7 @@ a = Analysis(
     ['chihaya.py'],
     pathex=[],
     binaries=[],
-    datas=[('persona.md', '.')],
+    datas=[('persona.md', '.'), ('assets\\fonts', 'assets\\fonts')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -31,12 +31,12 @@ class MailWorker(QThread):
 
 def mail_reply(result: MailResult, *, chinese: bool) -> str:
     if result.search.keywords:
-        title = "符合求職關鍵字的未讀收件匣郵件" if chinese else "Unread inbox mail matching job keywords"
+        title = "符合求职关键词的未读收件箱邮件" if chinese else "Unread inbox mail matching job keywords"
     else:
-        title = "未讀收件匣郵件" if chinese else "Unread inbox mail"
-    items = [row.display() for row in result.rows] or ["沒有符合的郵件。" if chinese else "No matching messages."]
+        title = "未读收件箱邮件" if chinese else "Unread inbox mail"
+    items = [row.display() for row in result.rows] or ["没有符合的邮件。" if chinese else "No matching messages."]
     if result.more:
-        items.append(f"只顯示最多 {LIMIT} 封，還有其他符合的郵件。" if chinese else
+        items.append(f"最多只显示 {LIMIT} 封，还有其他符合的邮件。" if chinese else
                      f"Showing up to {LIMIT}; more messages match.")
     return "\n".join([f"{result.search.day} | {title}", *items])
 
@@ -49,7 +49,7 @@ class MailView(QGroupBox):
     reconnected = Signal()
 
     def __init__(self, reader: GmailReader, zone: ZoneInfo, settings: QSettings) -> None:
-        super().__init__("Mail")
+        super().__init__("Gmail 未读邮件")
         self.reader, self.zone, self.settings = reader, zone, settings
         self.worker: MailWorker | None = None
         self._brief_busy = False
@@ -57,42 +57,38 @@ class MailView(QGroupBox):
         self.needs_reconnect = False
         self.had_token = reader.token.is_file()
         self.connect_button = QPushButton()
-        self.refresh_button = QPushButton("Refresh mail")
-        self.remove_button = QPushButton("Disconnect Gmail")
+        self.refresh_button = QPushButton("刷新邮件")
+        self.remove_button = QPushButton("断开 Gmail 连接")
         self.filter = QComboBox()
-        self.filter.setAccessibleName("Mail search")
-        for title, key in (("Today", "today"), ("Today: job matches", "jobs"), ("All dates", "recent")):
+        self.filter.setAccessibleName("邮件搜索")
+        for title, key in (("今日", "today"), ("今日求职邮件", "jobs"), ("所有日期", "recent")):
             self.filter.addItem(title, key)
         self.keywords = QLineEdit(settings.value("gmail/job_keywords", DEFAULT_KEYWORDS, type=str))
-        self.keywords.setAccessibleName("Gmail job keywords")
+        self.keywords.setAccessibleName("Gmail 求职关键词")
         self.keywords.setMaxLength(620)
-        self.keywords.setToolTip("Comma-separated phrases. Used only for job matching.")
-        self.status = QLabel("Saved Gmail authorization. Refresh to load mail." if self.had_token else
-                             "Gmail is not connected.")
+        self.keywords.setToolTip("用逗号分隔，只用于筛选求职邮件。")
+        self.status = QLabel("已保存 Gmail 授权，请刷新邮件。" if self.had_token else
+                             "Gmail 尚未连接，请到“设置”连接。")
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
-        self.status.setAccessibleName("Gmail status")
+        self.status.setAccessibleName("Gmail 状态")
         self.rows = QListWidget()
-        self.rows.setAccessibleName("Recent unread mail")
+        self.rows.setAccessibleName("最近未读邮件")
         self.preview = QPlainTextEdit(readOnly=True)
-        self.preview.setAccessibleName("Gmail message preview")
-        self.preview.setPlaceholderText("Select a message to preview it without marking it read.")
-        self.rows.setMaximumHeight(105)
-        self.preview.setMaximumHeight(105)
-        buttons, filters, panes = QHBoxLayout(), QHBoxLayout(), QHBoxLayout()
-        for button in (self.connect_button, self.refresh_button, self.remove_button):
-            buttons.addWidget(button)
+        self.preview.setAccessibleName("Gmail 邮件预览")
+        self.preview.setPlaceholderText("选择邮件即可预览，不会标为已读。")
+        self.rows.setWordWrap(True)
+        self.rows.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        filters, panes = QHBoxLayout(), QHBoxLayout()
         filters.addWidget(self.filter)
-        filters.addWidget(QLabel("Job keywords:"))
-        filters.addWidget(self.keywords, 1)
+        filters.addStretch()
+        filters.addWidget(self.refresh_button)
         panes.addWidget(self.rows, 1)
         panes.addWidget(self.preview, 1)
         layout = QVBoxLayout(self)
-        layout.addLayout(buttons)
         layout.addLayout(filters)
         layout.addWidget(self.status)
-        layout.addWidget(QLabel("Recent unread mail"))
-        layout.addLayout(panes)
+        layout.addLayout(panes, 1)
         self.connect_button.clicked.connect(lambda: self.refresh(connect=True))
         self.refresh_button.clicked.connect(lambda: self.refresh())
         self.remove_button.clicked.connect(self.disconnect)
@@ -113,7 +109,7 @@ class MailView(QGroupBox):
     def update_controls(self) -> None:
         connected = self.reader.token.is_file()
         idle = not self.busy
-        self.connect_button.setText("Reconnect Gmail" if connected or self.needs_reconnect else "Connect Gmail")
+        self.connect_button.setText("重新连接 Gmail" if connected or self.needs_reconnect else "连接 Gmail")
         self.connect_button.setEnabled(idle)
         self.refresh_button.setEnabled(idle and connected and not self.needs_reconnect)
         self.remove_button.setEnabled(idle and connected)
@@ -133,12 +129,12 @@ class MailView(QGroupBox):
         if self.had_token and not connected:
             self.clear_rows()
             self.needs_reconnect = False
-            self.status.setText("Gmail connection removed.")
+            self.status.setText("已断开 Gmail 连接。")
             self.disconnected.emit()
         self.had_token = connected
         if self.result is not None and self.result.search.day is not None:
-            if self.result.search.day != datetime.now(self.zone).date() and not self.status.text().startswith("Stale results."):
-                self.status.setText(f"Stale results. Mail shown is for {self.result.search.day}. Refresh for today.")
+            if self.result.search.day != datetime.now(self.zone).date() and not self.status.text().startswith("数据已过期"):
+                self.status.setText(f"数据已过期：当前显示 {self.result.search.day} 的邮件，请刷新。")
         self.update_controls()
 
     def disconnect(self) -> None:
@@ -147,14 +143,14 @@ class MailView(QGroupBox):
         try:
             self.reader.token.unlink(missing_ok=True)
         except OSError:
-            self.status.setText("Could not remove the saved Gmail connection.")
+            self.status.setText("无法移除已保存的 Gmail 授权。")
             return
         self.check_connection()
 
     def invalidate_search(self) -> None:
         if self.result is not None:
             self.clear_rows()
-            self.status.setText("Mail filter changed. Refresh for results.")
+            self.status.setText("筛选条件已变更，请刷新。")
 
     def save_keywords(self) -> None:
         try:
@@ -184,7 +180,7 @@ class MailView(QGroupBox):
             self.filter.setCurrentIndex(self.filter.findData(kind))
         try:
             if not connect and not self.reader.token.is_file():
-                raise ReconnectGmail("Gmail is not connected. Choose Connect Gmail in Today.")
+                raise ReconnectGmail("Gmail 尚未连接，请到“设置”页连接 Gmail。")
             search = self.make_search(kind)
         except GmailError as error:
             self.status.setText(str(error))
@@ -196,7 +192,7 @@ class MailView(QGroupBox):
         elif self.result is not None and self.result.search != search:
             self.clear_rows()
         self.preview.clear()
-        self.status.setText("Complete Gmail sign-in in your browser…" if connect else "Refreshing Gmail…")
+        self.status.setText("请在浏览器完成 Gmail 登录…" if connect else "正在刷新 Gmail…")
         self.start(MailWorker(self.reader, self.zone, search=search, connect=connect, chat=chat))
         return True
 
@@ -207,9 +203,9 @@ class MailView(QGroupBox):
 
     def preview_message(self, message_id: str) -> None:
         if self.busy or not self.reader.token.is_file():
-            self.preview.setPlainText("Gmail is busy or disconnected. Try again after connecting or refreshing.")
+            self.preview.setPlainText("Gmail 正忙或尚未连接，请稍后再试。")
             return
-        self.preview.setPlainText("Loading message preview…")
+        self.preview.setPlainText("正在载入邮件预览…")
         self.start(MailWorker(self.reader, self.zone, message_id=message_id))
 
     def start(self, worker: MailWorker) -> None:
@@ -238,7 +234,7 @@ class MailView(QGroupBox):
             if worker.search is None:
                 self.preview.setPlainText(note)
             else:
-                self.status.setText(("Stale results. " if self.result is not None else "") + note)
+                self.status.setText(("显示的是先前结果。" if self.result is not None else "") + f"更新失败：{note}")
             if self.needs_reconnect:
                 self.status.setText(note)
             if worker.chat:
@@ -248,13 +244,12 @@ class MailView(QGroupBox):
             self.clear_rows()
             self.result = worker.result
             self.rows.addItems([row.display() for row in self.result.rows])
-            label = "Matching mail" if self.result.search.keywords else "Unread inbox mail"
-            scope = str(self.result.search.day) if self.result.search.day else "all dates"
-            detail = "No matching messages." if not self.result.rows else (
-                f"Showing {len(self.result.rows)}. More messages match." if self.result.more else
-                f"Showing {len(self.result.rows)}.")
-            self.status.setText(f"Gmail connected. {label} ({scope}). {detail} "
-                                f"Refreshed {datetime.now(self.zone):%H:%M:%S %Z}.")
+            label = "符合条件的邮件" if self.result.search.keywords else "收件箱未读邮件"
+            scope = str(self.result.search.day) if self.result.search.day else "所有日期"
+            detail = "没有符合的邮件。" if not self.result.rows else (
+                f"显示 {len(self.result.rows)} 封，另有其他符合的邮件。" if self.result.more else
+                f"显示 {len(self.result.rows)} 封。")
+            self.status.setText(f"{label}（{scope}） · {detail} 更新于 {datetime.now(self.zone):%H:%M:%S %Z}")
             if worker.chat:
                 chinese = any("\u3400" <= char <= "\u9fff" for char in worker.chat)
                 self.chat_ready.emit(worker.chat, mail_reply(self.result, chinese=chinese), True)

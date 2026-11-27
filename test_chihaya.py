@@ -23,7 +23,7 @@ from calendar_reader import CalendarDay, CalendarError, Event as CalendarEvent
 from claude_reply import ClaudeError, request_reply
 from dialogue import Reply, respond
 from desktop_today import briefing_text, collect_reminders
-from task_chat import TaskAction, TaskReply, apply_task_reply
+from task_chat import Operation, TaskAction, TaskReply, apply_task_reply
 from tasks import Task, TaskError, TaskStore, local_date, plan_today
 
 
@@ -63,8 +63,7 @@ class OfflineTests(unittest.TestCase):
             window = MainWindow(Path(directory) / "portraits")
             window.show()
             try:
-                self.assertEqual(window.mode.currentText(), "Offline")
-                self.assertEqual(window.portrait.expression, "neutral")
+                self.assertEqual(window.mode.currentText(), "离线")
                 initial = window.history.toPlainText()
                 neutral_render = window.portrait.grab().toImage()
                 window.entry.setText("   ")
@@ -180,7 +179,7 @@ class ClaudeTests(unittest.TestCase):
                 "id": "msg_fake", "type": "message", "role": "assistant", "model": "override",
                 "content": [{"type": "text", "text": json.dumps({
                     "reply": "Next step.", "expression": "unknown",
-                    "action": dict.fromkeys(("title", "target", "date", "field", "minutes"), "") | {"kind": "none"},
+                    "action": {"mode": "none", "operations": []},
                 })}],
                 "stop_reason": "end_turn", "stop_sequence": None,
                 "usage": {"input_tokens": 25, "output_tokens": 12},
@@ -198,7 +197,7 @@ class ClaudeTests(unittest.TestCase):
         self.assertEqual(headers.get("authorization"), "Bearer fake-test-key")
         self.assertEqual(payload["model"], "override")
         self.assertTrue(payload["system"].startswith("Local persona for testing.\n"))
-        self.assertEqual(payload["max_tokens"], 512)
+        self.assertEqual(payload["max_tokens"], 3072)
         self.assertEqual(payload["messages"][0]["content"], "Question 2")
         self.assertEqual(len(payload["messages"]), 13)
         self.assertEqual(payload["messages"][-1], {"role": "user", "content": "Now?"})
@@ -206,11 +205,11 @@ class ClaudeTests(unittest.TestCase):
 
     def test_sdk_errors_are_sanitized_and_not_retried(self) -> None:
         for code, reason, expected in (
-            (None, httpx2.ReadTimeout, "timed out"),
-            (None, httpx2.ConnectError, "Could not connect"),
-            (401, None, "authentication"),
-            (400, None, "insufficient credits"),
-            (429, None, "rate or usage limit"),
+            (None, httpx2.ReadTimeout, "超时"),
+            (None, httpx2.ConnectError, "无法连接到 Claude"),
+            (401, None, "身份验证"),
+            (400, None, "额度不足"),
+            (429, None, "速率或用量上限"),
         ):
             with self.subTest(code=code, reason=reason):
                 calls = []
@@ -301,7 +300,7 @@ class ClaudeTests(unittest.TestCase):
                 "id": "msg_fake", "type": "message", "role": "assistant", "model": "local-model",
                 "content": [{"type": "text", "text": json.dumps({
                     "reply": "I checked.", "expression": "focused",
-                    "action": dict.fromkeys(("title", "target", "date", "field", "minutes"), "") | {"kind": "none"},
+                    "action": {"mode": "none", "operations": []},
                 })}],
                 "stop_reason": "end_turn", "stop_sequence": None,
                 "usage": {"input_tokens": 25, "output_tokens": 12},
@@ -342,7 +341,7 @@ class ClaudeTests(unittest.TestCase):
                 self.assertNotIn("Engineering standup", str(payloads))
                 window.clear_conversation()
                 send("其他時間呢？")
-                self.assertIn("你想查哪一天或哪個時段？", window.history.toPlainText())
+                self.assertIn("你想查哪一天或哪个时段？", window.history.toPlainText())
                 self.assertIsNone(window.calendar_context)
         finally:
             window.close()
@@ -359,7 +358,7 @@ class ClaudeTests(unittest.TestCase):
             self.wait_for_request(window)
 
         def propose(title, minutes="30"):
-            action = TaskAction("add", title=title, minutes=minutes, confirm=True)
+            action = TaskAction("propose", (Operation("add", title=title, minutes=minutes),))
             with patch("chihaya.request_reply", return_value=TaskReply("Shall I add it?", "focused", action)):
                 send("Propose a task")
 
@@ -382,7 +381,7 @@ class ClaudeTests(unittest.TestCase):
             propose("Write failure")
             with patch.object(store, "add", side_effect=TaskError("Could not save tasks.")):
                 send("yes please")
-            self.assertIn("Could not save tasks.", window.status.text())
+            self.assertIn("Could not save tasks.", window.history.toPlainText())
             send("yes please")
             propose("Cleared")
             window.clear_conversation()
@@ -392,21 +391,41 @@ class ClaudeTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_claude_is_default_when_configured_and_missing_key_is_explained(self) -> None:
+        window = MainWindow(self.folder / "portraits")
+        try:
+            self.assertEqual(window.mode.currentText(), "Claude")
+            self.assertIn("Claude 模式", window.status.text())
+            self.assertNotIn("fake-test-key", window.status.text())
+        finally:
+            window.quit_app()
+        self.config.unlink()
+        offline = MainWindow(self.folder / "portraits")
+        try:
+            self.assertEqual(offline.mode.currentText(), "离线")
+            self.assertIn(r"%LOCALAPPDATA%\Chihaya\.env", offline.status.text())
+            offline.show()
+            offline.show_conversation(True)
+            self.assertTrue(offline.status.isVisible())
+        finally:
+            offline.quit_app()
+
     def test_switch_background_wait_and_manual_retry(self) -> None:
         window = MainWindow(self.folder / "portraits")
         window.show()
         release = Event()
         try:
             self.config.unlink()
+            window.mode.setCurrentIndex(0)
             window.mode.setCurrentText("Claude")
-            self.assertEqual(window.mode.currentText(), "Offline")
+            self.assertEqual(window.mode.currentText(), "离线")
             self.assertIn(r"%LOCALAPPDATA%\Chihaya\.env", window.status.text())
             self.config.write_text("ANTHROPIC_API_KEY=fake-test-key\n")
             window.mode.setCurrentText("Claude")
             window.entry.setText("Plan tomorrow")
             calls = []
 
-            def fake_reply(folder, message, history):
+            def fake_reply(folder, message, history, **kwargs):
                 calls.append((message, history))
                 if len(calls) == 1:
                     release.wait(3)
@@ -416,7 +435,7 @@ class ClaudeTests(unittest.TestCase):
             with patch("chihaya.request_reply", side_effect=fake_reply):
                 window.send()
                 self.assertFalse(window.send_button.isEnabled())
-                self.assertIn("Waiting", window.status.text())
+                self.assertIn("正在等待 Claude", window.status.text())
                 self.assertFalse(window.close())
                 window.send()
                 release.set()
@@ -430,7 +449,7 @@ class ClaudeTests(unittest.TestCase):
                 self.assertEqual(calls, [("Plan tomorrow", ()), ("Plan tomorrow", ())])
                 self.assertIn("Which deadline comes first?", window.history.toPlainText())
                 self.assertEqual(window.portrait.expression, "focused")
-                window.mode.setCurrentText("Offline")
+                window.mode.setCurrentIndex(0)
                 window.entry.setText("早上好")
                 window.send()
                 self.assertEqual(window.portrait.expression, "smile")
@@ -454,38 +473,82 @@ class ClaudeTests(unittest.TestCase):
         store = window.store
         assert store is not None
 
-        def send(message, action):
-            with patch("chihaya.request_reply", return_value=TaskReply("Unverified model claim.", "focused", action)):
+        def send(message, mode, *operations, reply="好的。"):
+            action = TaskAction(mode, tuple(operations))
+            with patch("chihaya.request_reply", return_value=TaskReply(reply, "focused", action)) as claude:
                 window.entry.setText(message)
                 window.send()
                 self.wait_for_request(window)
+            return claude
 
+        claim = "Unverified model claim."
         try:
-            send("帮我加一项：这周五前投两个岗位，预计 30 分钟。",
-                 TaskAction("add", title="投两个岗位", date="这周五", minutes="30"))
+            send("帮我加一项：这周五前投两个岗位，预计 30 分钟。", "execute",
+                 Operation("add", title="投两个岗位", date=local_date("这周五", date.today()).isoformat(), minutes="30"))
             saved, = store.open_tasks()
             self.assertEqual((saved.title, saved.minutes, saved.deadline),
                              ("投两个岗位", 30, local_date("这周五", date.today()).isoformat()))
-            self.assertEqual(window.tasks.list.count(), 1)
-            send("我今天只有一小时，先做哪项？", TaskAction("plan"))
+            self.assertEqual(len(window.tasks.visible_tasks()), 1)
+            send("我今天只有一小时，先做哪项？", "none", Operation("plan", minutes="60"))
             self.assertIn("可安排 30 / 60 分钟", window.history.toPlainText())
             store.add("投两个岗位（备选）", "", "", "", today=date.today())
-            send("Complete 投两个岗位", TaskAction("complete", target="投两个岗位"))
-            self.assertIn("你指的是哪一项？", window.history.toPlainText())
-            send("Move it to tomorrow", TaskAction("reschedule", target="it", date="tomorrow"))
+            send("Complete 投两个", "execute", Operation("complete", target="投两个"), reply=claim)
+            self.assertIn("请用 #编号 指定", window.history.toPlainText())
+            send("Move #1", "execute", Operation("reschedule", target="#1", date="tomorrow"), reply=claim)
             self.assertIn("planned day or the deadline", window.history.toPlainText())
-            send("I might add an interview task", TaskAction("add", title="interview task"))
+            send("I might add an interview task", "none")
             self.assertEqual(len(store.open_tasks()), 2)
-            self.assertNotIn("Unverified model claim.", window.history.toPlainText())
             with store.transaction("test") as db:
                 db.execute("CREATE TRIGGER fail_task BEFORE INSERT ON tasks BEGIN SELECT RAISE(ABORT, 'test failure'); END")
-            previous = window.history.toPlainText()
             previous_rows = store.open_tasks()
-            send("Add a resume review", TaskAction("add", title="resume review"))
-            self.assertIn("Could not save", window.status.text())
-            self.assertEqual(window.history.toPlainText(), previous)
+            send("Add a resume review", "execute", Operation("add", title="resume review"), reply=claim)
+            self.assertIn("保存失败", window.history.toPlainText())
+            self.assertNotIn(claim, window.history.toPlainText())
             self.assertEqual(store.open_tasks(), previous_rows)
             self.assertTrue(window.send_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_chat_saves_a_list_of_plans_in_any_wording_with_context_and_undo(self) -> None:
+        window = MainWindow(self.folder / "portraits")
+        window.show()
+        window.mode.setCurrentText("Claude")
+        store = window.store
+        assert store is not None
+        store.add("复习 CSC 小考", "", "", "", today=date.today(), category="CSC")
+        plans = tuple(Operation("add", title=title, category="Project ABC") for title in ("写简历", "投三个岗位", "跑步"))
+
+        def send(message, mode, *operations, reply="好的。"):
+            with patch("chihaya.request_reply", return_value=TaskReply(reply, "focused", TaskAction(mode, tuple(operations)))) as claude:
+                window.entry.setText(message)
+                window.send()
+                self.wait_for_request(window)
+            return claude
+
+        try:
+            claude = send("我今天剩下要写简历、投三个岗位、再跑步。", "propose", *plans, reply="要把这三件事放进待办吗？")
+            context = claude.call_args.kwargs["task_context"]
+            self.assertIn("复习 CSC 小考", context)
+            self.assertEqual(len(store.open_tasks()), 1)
+            self.assertIn("写简历", window.history.toPlainText())
+            claude = send("你帮我把这三件事放入代办吧", "approve_pending")
+            self.assertIn("pending_proposal", claude.call_args.kwargs["task_context"])
+            self.assertNotIn("没有修改任务", window.history.toPlainText())
+            self.assertEqual([task.title for task in store.open_tasks()], ["复习 CSC 小考", "写简历", "投三个岗位", "跑步"])
+            self.assertEqual(store.categories(), ["CSC", "Project ABC"])
+            self.assertIn("已新增", window.history.toPlainText())
+            send("算了，刚才那些撤销", "execute", Operation("undo"))
+            self.assertEqual([task.title for task in store.open_tasks()], ["复习 CSC 小考"])
+            send("新开一个项目 Thesis，作为一个类别", "execute", Operation("create_category", category="Thesis"))
+            self.assertIn("Thesis", store.categories())
+            send("把复习放进 Thesis", "execute", Operation("set_category", target="#1", category="thesis"))
+            self.assertEqual(store.open_tasks()[0].category, "Thesis")
+            send("删掉 Thesis 类别", "execute", Operation("delete_category", category="Thesis"))
+            self.assertIn("Thesis", store.categories())
+            self.assertIsNotNone(window.pending_action)
+            send("好", "none")
+            self.assertNotIn("Thesis", store.categories())
+            self.assertIsNone(store.open_tasks()[0].category)
         finally:
             window.close()
 
@@ -511,27 +574,31 @@ class LocalTaskTests(unittest.TestCase):
             try:
                 window.tabs.setCurrentWidget(window.today)
                 with patch.object(calendar.reader, "read", side_effect=CalendarError("Retry after timeout.")):
+                    calendar.reader.token.touch()
+                    calendar.set_view_mode("day")
+                    wait_until(lambda: calendar.worker is None)
                     calendar.refresh_button.click()
                     wait_until(lambda: calendar.worker is None)
                 self.assertIsNone(calendar.snapshot)
                 self.assertIn("timeout", calendar.status.text())
-                self.assertEqual(calendar.refresh_button.text(), "Retry")
+                self.assertEqual(calendar.refresh_button.text(), "重试")
                 window.today.budget.setText("60")
                 window.today.suggest.click()
-                self.assertIn("Fits 0 / 60 minutes", window.today.output.toPlainText())
+                self.assertIn("建议使用 0 / 60 分钟", window.today.output.toPlainText())
                 zone = ZoneInfo("UTC")
                 empty = CalendarDay(datetime.now(zone).date(), zone, (), (), (), datetime.now(zone))
                 with patch.object(calendar.reader, "read", return_value=empty):
                     calendar.refresh_button.click()
                     wait_until(lambda: calendar.worker is None)
-                    self.assertIn("No events", calendar.status.text())
+                    self.assertIn("已载入行程", calendar.status.text())
+                    self.assertEqual(calendar.grid.message(), "这段时间没有行程")
                     window.tabs.setCurrentIndex(0)
-                    window.entry.setText("我今天下午還有哪些空檔？")
+                    window.entry.setText("我今天下午还有哪些空档？")
                     with patch("chihaya.request_reply") as claude:
                         window.send()
                         wait_until(lambda: window.request is None)
                         claude.assert_not_called()
-                    self.assertIn("可用空檔", window.history.toPlainText())
+                    self.assertIn("可用空档", window.history.toPlainText())
             finally:
                 window.close()
 
@@ -547,37 +614,43 @@ class LocalTaskTests(unittest.TestCase):
                 window.tabs.setCurrentWidget(window.tasks)
                 tasks = window.tasks
                 for title, due, minutes in (("筛选岗位", "Friday", "45"), ("投递两个岗位", later, "30")):
-                    tasks.title.setText(title)
-                    tasks.deadline.setText(due)
-                    tasks.minutes.setText(minutes)
-                    tasks.add.click()
-                self.assertEqual(tasks.list.count(), 2)
-                tasks.title.setText("Invalid estimate")
-                tasks.minutes.setText("0")
-                tasks.add.click()
-                self.assertIn("positive", tasks.status.text())
-                self.assertEqual(tasks.list.count(), 2)
+                    editor = tasks.open_editor()
+                    editor.title.setText(title)
+                    editor.deadline.setText(due)
+                    editor.minutes.setText(minutes)
+                    editor.accept()
+                self.assertEqual(len(tasks.visible_tasks()), 2)
+                editor = tasks.open_editor()
+                editor.title.setText("Invalid estimate")
+                editor.minutes.setText("0")
+                editor.accept()
+                self.assertIn("正整数", editor.status.text())
+                self.assertEqual(len(tasks.visible_tasks()), 2)
+                editor.reject()
                 window.tabs.setCurrentWidget(window.today)
                 window.today.budget.setText("60")
                 window.today.suggest.click()
                 plan = window.today.output.toPlainText()
-                self.assertIn("Fits 45 / 60 minutes", plan)
-                self.assertIn("Suggested order:\n#1 筛选岗位", plan)
-                self.assertIn("Does not fit:\n#2 投递两个岗位", plan)
+                self.assertIn("建议使用 45 / 60 分钟", plan)
+                self.assertIn("建议顺序\n筛选岗位", plan)
+                self.assertIn("排不下\n投递两个岗位", plan)
                 window.tabs.setCurrentWidget(tasks)
-                tasks.list.setCurrentRow(0)
-                self.assertEqual(tasks.deadline.text(), friday.isoformat())
+                first = tasks.visible_tasks()[0]
+                tasks.select_task(first.id)
+                self.assertEqual(tasks.editor.deadline.text(), friday.isoformat())
                 tasks.complete.click()
-                tasks.list.setCurrentRow(0)
-                tasks.day.setText("tomorrow")
-                tasks.save.click()
+                second = tasks.visible_tasks()[0]
+                tasks.select_task(second.id)
+                tasks.editor.day.setText("tomorrow")
+                tasks.editor.accept()
             finally:
                 window.close()
             reopened = MainWindow(folder)
             try:
-                self.assertEqual(reopened.tasks.list.count(), 1)
-                self.assertIn(later, reopened.tasks.list.item(0).text())
-                self.assertIn(str(today + timedelta(days=1)), reopened.tasks.list.item(0).text())
+                shown = reopened.tasks.visible_tasks()
+                self.assertEqual(len(shown), 1)
+                self.assertEqual(shown[0].deadline, later)
+                self.assertEqual(shown[0].planned_day, str(today + timedelta(days=1)))
                 with closing(sqlite3.connect(folder.parent / "tasks.sqlite3")) as db:
                     self.assertEqual(db.execute("SELECT status, deadline FROM tasks WHERE id = 1").fetchone(),
                                      ("complete", friday.isoformat()))
@@ -601,13 +674,14 @@ class LocalTaskTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = TaskStore(Path(directory) / "tasks.sqlite3")
             store.add("Review", "Friday 15:45", "20", "", today=now.date())
-            reply = TaskReply("Guess", "focused", TaskAction("complete", target="#1"))
-            _, changed = apply_task_reply(reply, "Complete #10", store, now)
-            self.assertFalse(changed)
-            move = TaskReply("Guess", "focused", TaskAction(
+            reply = TaskReply("Guess", "focused", TaskAction("execute", (Operation("complete", target="#10"),)))
+            outcome = apply_task_reply(reply, "Complete #10", store, now)
+            self.assertFalse(outcome.changed)
+            self.assertNotIn("Guess", outcome.reply.reply)
+            move = TaskReply("Guess", "focused", TaskAction("execute", (Operation(
                 "reschedule", target="#1", field="planned_day", date="tomorrow",
-            ))
-            _, changed = apply_task_reply(move, "Move the planned day for #1 to tomorrow", store, now)
-            self.assertTrue(changed)
+            ),)))
+            outcome = apply_task_reply(move, "Move the planned day for #1 to tomorrow", store, now)
+            self.assertTrue(outcome.changed)
             moved, = store.open_tasks()
             self.assertEqual((moved.deadline, moved.planned_day), ("2026-11-20 15:45", "2026-11-21"))

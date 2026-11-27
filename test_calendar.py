@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from availability import openings, place_tasks
 from calendar_chat import calendar_answer, parse_calendar_query
-from calendar_reader import CalendarDay, CalendarReader, Event
+from calendar_reader import CalendarDay, CalendarError, CalendarReader, Event
 from tasks import TaskStore
 
 
@@ -48,6 +48,29 @@ class CalendarTests(TestCase):
         for field in ("description", "attendees", "conferenceData", "hangoutLink"):
             self.assertNotIn(field, params["fields"])
         self.assertTrue(all(call[0] == "get" for call in session.method_calls))
+
+    def test_week_read_uses_one_query_per_calendar_and_splits_events_by_day(self):
+        session = Mock()
+        zone = ZoneInfo("America/New_York")
+        overnight = {"summary": "Night shift", "start": {"dateTime": "2026-11-23T22:00:00-05:00"},
+                     "end": {"dateTime": "2026-11-24T02:00:00-05:00"}}
+        tuesday = {"summary": "Tuesday class", "start": {"dateTime": "2026-11-24T14:00:00-05:00"},
+                   "end": {"dateTime": "2026-11-24T15:15:00-05:00"}}
+        session.get.side_effect = [response([{"id": "a", "summary": "A", "primary": True}]),
+                                   response([overnight, tuesday])]
+        days = [date(2026, 11, 22) + timedelta(days=offset) for offset in range(7)]
+        snapshots = CalendarReader.read_span(session, days, zone, ("primary",))
+        self.assertEqual(session.get.call_count, 2)
+        params = session.get.call_args_list[1].kwargs["params"]
+        self.assertEqual((params["timeMin"], params["timeMax"]),
+                         ("2026-11-22T00:00:00-05:00", "2026-11-29T00:00:00-05:00"))
+        titles = {item.day: [event.title for event in item.events] for item in snapshots}
+        self.assertEqual(titles[date(2026, 11, 22)], [])
+        self.assertEqual(titles[date(2026, 11, 23)], ["Night shift"])
+        self.assertEqual(titles[date(2026, 11, 24)], ["Night shift", "Tuesday class"])
+        self.assertEqual(titles[date(2026, 11, 25)], [])
+        with self.assertRaises(CalendarError):
+            CalendarReader(Path("unused")).read_days([days[0], days[2]], zone)
 
     def test_contiguous_placement_and_database_remains_intact(self):
         zone = ZoneInfo("America/New_York")
@@ -127,7 +150,7 @@ class CalendarTests(TestCase):
             start = datetime(2026, 11, 23, 15, tzinfo=zone)
             event = Event("Private calendar", "Private meeting", start, start + timedelta(minutes=30), False, True)
             snapshot = CalendarDay(day, zone, (), (event,), (), datetime.now(zone))
-            with patch.object(reader, "_read", return_value=snapshot) as fetch:
+            with patch.object(reader, "_read", return_value=[snapshot]) as fetch:
                 reader.read(day, zone)
                 for prompt in ("明天我什麼時候有空", "11/23我什麼時候有空", "2026-11-23我什麼時候有空"):
                     with self.subTest(prompt=prompt):
@@ -138,10 +161,10 @@ class CalendarTests(TestCase):
                         self.assertIn("14:00 EST–15:00 EST", answer)
                         self.assertIn("15:30 EST–16:00 EST", model or "")
                         self.assertNotIn("Private", model or "")
-                fetch.assert_called_once_with(day, zone, False, ("primary", "secondary"))
+                fetch.assert_called_once_with([day], zone, False, ("primary", "secondary"))
                 reader.save_selection(("primary",))
                 reader.read(day, zone, reuse=True)
-                fetch.assert_called_with(day, zone, False, ("primary",))
+                fetch.assert_called_with([day], zone, False, ("primary",))
         override = parse_calendar_query("11/23 13:00到14:00有空檔嗎", connected=True,
                                         today=now.date(), window=("14:00", "16:00"))
         assert override is not None

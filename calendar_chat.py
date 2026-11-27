@@ -3,7 +3,7 @@ from datetime import date, datetime, time, timedelta, UTC
 import re
 from zoneinfo import ZoneInfo
 
-from availability import availability_text, openings, place_tasks, window_end
+from availability import availability_text, openings, place_tasks, slot_intervals, window_end
 from calendar_reader import CalendarError, CalendarReader, day_bounds
 from task_chat import COMMANDS, matches_command, time_budget
 from tasks import TaskError, TaskStore, plan_text, plan_today
@@ -43,7 +43,11 @@ def parse_calendar_query(message: str, *, connected: bool, today: date,
     asks_free = bool(re.search(r"空[檔档]|有[沒没]有空|(?:什[麼么]時候|什么时候|幾點|几点).*?有空"
                                r"|free time|free slot|availability|when am i free"
                                r"|(?:check|show|look at).*calendar|(?:看|查).*?(?:行事曆|日历)", text))
-    asks_plan = bool(re.search(r"排一下|安排|先做哪|排程|\b(?:plan|prioriti[sz]e|schedule)\b|what should i do first", text))
+    # "安排" and "schedule" are also ordinary nouns ("我有其他安排"), so only a request to arrange something counts.
+    asks_plan = bool(re.search(
+        r"排一下|排程|(?:幫我|帮我|请|請)\s*安排|安排一下|安排下|先做哪"
+        r"|\b(?:plan|prioriti[sz]e)\s+(?:my|the|these|those|this|that|it|today|tomorrow|me|some)\b"
+        r"|\bschedule\s+(?:my|the|these|those|this|that|it|today|tomorrow|me|some)\b|what should i do first", text))
     events = bool(re.search(r"其他(?:時間|时间)|剩下的(?:時間|时间)|what (?:am i doing|is booked)|rest of (?:the|that) (?:time|window)", text))
     single = re.fullmatch(
         r"\s*(?:那|then\s+|what about\s+)?\s*(?:(\d{1,2}:\d{2})|"
@@ -57,7 +61,7 @@ def parse_calendar_query(message: str, *, connected: bool, today: date,
         active = None
     chinese = bool(re.search(r"[\u3400-\u9fff]", message))
     if (events or single) and active is None and not (explicit or relative or clock_range):
-        raise TaskError("你想查哪一天或哪個時段？" if chinese else "Which date or time window should I check?")
+        raise TaskError("你想查哪一天或哪个时段？" if chinese else "Which date or time window should I check?")
     try:
         if explicit and explicit[1]:
             day = date(int(explicit[1]), int(explicit[2]), int(explicit[3]))
@@ -111,11 +115,11 @@ def parse_calendar_query(message: str, *, connected: bool, today: date,
                     candidates = [time(h) for h in (hour, hour + 12)
                                   if start <= time(h) and (end == time.min or time(h) < end)]
                     if len(candidates) != 1:
-                        raise TaskError("請說明是上午還是下午。" if chinese else "Do you mean AM or PM?")
+                        raise TaskError("请说明是上午还是下午。" if chinese else "Do you mean AM or PM?")
                     hour = candidates[0].hour
                 point = time(hour)
         except ValueError:
-            raise TaskError("Use a valid local time (HH:MM).") from None
+            raise TaskError("请使用有效的本地时间（HH:MM）。") from None
     return CalendarQuery(day, start, end, asks_plan, time_budget(text), chinese, events, point, follow_up)
 
 
@@ -123,12 +127,12 @@ def planning_time(value: str) -> time:
     try:
         return datetime.strptime(value.strip(), "%H:%M").time()
     except ValueError:
-        raise TaskError("Choose a valid local time (HH:MM).") from None
+        raise TaskError("请选择有效的本地时间（HH:MM）。") from None
 
 
 def validate_window(start: time, end: time) -> None:
     if end != time.min and end <= start:
-        raise TaskError("The planning window must end after it starts.")
+        raise TaskError("规划时段的结束时间必须晚于开始时间。")
 
 
 def calendar_answer(query: CalendarQuery, reader: CalendarReader, zone: ZoneInfo,
@@ -142,19 +146,23 @@ def calendar_answer(query: CalendarQuery, reader: CalendarReader, zone: ZoneInfo
         if snapshot.failures:
             raise CalendarError("One or more selected calendars could not be read.")
     except CalendarError:
-        notice = ("無法取得完整的行事曆空檔。" if query.chinese else
+        notice = ("无法取得完整的日历空档。" if query.chinese else
                   "Complete calendar availability is unavailable.")
         if query.plan and query.budget is not None and store is not None:
             local_now = (now or datetime.now(zone)).astimezone(zone).replace(tzinfo=None)
             result = plan_today(store.open_tasks(), query.budget, local_now, day=query.day)
             return heading + "\n" + notice + "\n" + plan_text(result, chinese=query.chinese), None
-        hint = ("請先到「Today」連線或重新整理，也可以告訴我可用的分鐘數。" if query.chinese else
+        hint = ("请先到“今日”页连接或刷新日历，也可以告诉我可用的分钟数。" if query.chinese else
                 "Connect or refresh in Today, or tell me your available minutes for a manual plan.")
         return heading + "\n" + notice + "\n" + hint, None
     now = now or datetime.now(zone)
-    free = openings(snapshot, query.start, query.end, now)
+    try:
+        saved_slots = slot_intervals(store.open_tasks(), query.day, zone) if store else []
+    except TaskError:
+        saved_slots = []
+    free = openings(snapshot, query.start, query.end, now, saved_slots)
     if query.plan and store is None:
-        raise TaskError("Local task storage is unavailable.")
+        raise TaskError("本机待办存储不可用。")
     tasks = store.open_tasks() if query.plan and store else []
     schedule = place_tasks(snapshot, free, tasks, now, query.budget) if query.plan and store else None
     ended = now.timestamp() >= window_end(query.day, query.end, zone).timestamp()
@@ -172,7 +180,7 @@ def calendar_answer(query: CalendarQuery, reader: CalendarReader, zone: ZoneInfo
         busy_events = matches
     else:
         # Historical busy blocks describe calendar commitments, not remaining time from now.
-        all_free = openings(snapshot, query.start, query.end, day_bounds(query.day, zone)[0])
+        all_free = openings(snapshot, query.start, query.end, day_bounds(query.day, zone)[0], saved_slots)
         cursor = lower
         busy = []
         for left, right in [*all_free, (upper, upper)]:
@@ -180,7 +188,7 @@ def calendar_answer(query: CalendarQuery, reader: CalendarReader, zone: ZoneInfo
                 busy.append(f"{cursor.astimezone(zone):%H:%M}–{left.astimezone(zone):%H:%M}")
             cursor = right
         if busy:
-            label = "其餘忙碌時段：" if query.chinese else "Busy blocks in this window: "
+            label = "其余忙碌时段：" if query.chinese else "Busy blocks in this window: "
             facts.append(label + ", ".join(busy))
     safe = "\n".join(facts) + "\n" + availability_text(
         snapshot, free, None if any(task.mail_linked for task in tasks) else schedule,
@@ -188,8 +196,8 @@ def calendar_answer(query: CalendarQuery, reader: CalendarReader, zone: ZoneInfo
     local = "\n".join(facts) + "\n" + availability_text(
         snapshot, free, schedule, chinese=query.chinese, window_ended=ended)
     if query.events or query.point is not None:
-        label = "行事曆項目：" if query.chinese else "Calendar entries:"
+        label = "日历项目：" if query.chinese else "Calendar entries:"
         items = [f"{event.start:%H:%M}–{event.end:%H:%M}  {event.title}" if not event.all_day
                  else f"{'全天' if query.chinese else 'All day'}  {event.title}" for event in busy_events]
-        local += "\n" + label + "\n" + ("\n".join(items) or ("無" if query.chinese else "None"))
+        local += "\n" + label + "\n" + ("\n".join(items) or ("无" if query.chinese else "None"))
     return local, safe

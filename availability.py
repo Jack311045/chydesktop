@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta, UTC
 from zoneinfo import ZoneInfo
 
 from calendar_reader import CalendarDay, day_bounds
-from tasks import Task, deadline_order, ordered_tasks, task_line
+from tasks import Task, deadline_order, ordered_tasks, task_fields, task_line
 
 Interval = tuple[datetime, datetime]
 
@@ -13,7 +13,9 @@ def window_end(day: date, end: time, zone: ZoneInfo) -> datetime:
     return day_bounds(day, zone)[1] if end == time.min else datetime.combine(day, end, zone)
 
 
-def openings(snapshot: CalendarDay, start: time, end: time, now: datetime) -> list[Interval]:
+def openings(snapshot: CalendarDay, start: time, end: time, now: datetime,
+             busy_slots: Sequence[Interval] = ()) -> list[Interval]:
+    """Free intervals in the window; `busy_slots` are saved local plans that also occupy time."""
     if snapshot.failures:
         return []
     day_start, _ = day_bounds(snapshot.day, snapshot.zone)
@@ -25,8 +27,9 @@ def openings(snapshot: CalendarDay, start: time, end: time, now: datetime) -> li
     upper = window_end(snapshot.day, end, snapshot.zone).astimezone(UTC)
     if lower >= upper:
         return []
-    busy = sorted((max(lower, event.start.astimezone(UTC)), min(upper, event.end.astimezone(UTC)))
-                  for event in snapshot.events if event.busy)
+    busy = sorted((max(lower, left.astimezone(UTC)), min(upper, right.astimezone(UTC)))
+                  for left, right in (*((event.start, event.end) for event in snapshot.events if event.busy),
+                                      *busy_slots))
     free = []
     cursor = max(lower, day_start.astimezone(UTC))
     for left, right in busy:
@@ -38,6 +41,21 @@ def openings(snapshot: CalendarDay, start: time, end: time, now: datetime) -> li
     if cursor < upper:
         free.append((cursor, upper))
     return free
+
+
+def has_slot(task: Task, day: date) -> bool:
+    return bool(task.status == "open" and task.planned_day == day.isoformat() and task.start and task.end)
+
+
+def slot_intervals(tasks: Sequence[Task], day: date, zone: ZoneInfo) -> list[Interval]:
+    """Saved task slots on `day`; they are the producer's own plans and occupy that time."""
+    result: list[Interval] = []
+    for task in tasks:
+        if has_slot(task, day):
+            assert task.start and task.end
+            result.append((datetime.combine(day, time.fromisoformat(task.start), zone),
+                           datetime.combine(day, time.fromisoformat(task.end), zone)))
+    return result
 
 
 @dataclass
@@ -53,7 +71,7 @@ def place_tasks(snapshot: CalendarDay, intervals: Sequence[Interval], tasks: Seq
     remaining = list(intervals)
     result = Schedule([], [], [], 0)
     local_now = now.astimezone(snapshot.zone).replace(tzinfo=None)
-    for task in ordered_tasks(tasks, snapshot.day, local_now):
+    for task in ordered_tasks([task for task in tasks if not has_slot(task, snapshot.day)], snapshot.day, local_now):
         if task.minutes is None:
             result.unestimated.append(task)
             continue
@@ -75,7 +93,7 @@ def place_tasks(snapshot: CalendarDay, intervals: Sequence[Interval], tasks: Seq
 
 def availability_text(snapshot: CalendarDay, free: Sequence[Interval], schedule: Schedule | None = None,
                       *, chinese: bool = False, include_task_details: bool = True,
-                      window_ended: bool = False) -> str:
+                      window_ended: bool = False, desktop: bool = False) -> str:
     def clock(stamp: datetime) -> str:
         local = stamp.astimezone(snapshot.zone)
         return local.strftime("%H:%M:%S %Z" if local.second else "%H:%M %Z")
@@ -84,27 +102,29 @@ def availability_text(snapshot: CalendarDay, free: Sequence[Interval], schedule:
         return f"{clock(left)}–{clock(right)}"
 
     def task_display(task: Task, overdue: bool) -> str:
-        label = task_line(task) if include_task_details else f"#{task.id} ({task.minutes if task.minutes is not None else '?'} min)"
+        label = (task_fields(task).line() if desktop else task_line(task)) if include_task_details else f"#{task.id} ({task.minutes if task.minutes is not None else '?'} min)"
         return label + ((" [已逾期]" if chinese else " [overdue]") if overdue else "")
 
-    none = "無" if chinese else "None"
+    none = "无" if chinese else "None"
     lines = [f"{snapshot.day} ({snapshot.zone.key})"]
     if not snapshot.events:
-        lines.append("這天沒有行事曆事件。" if chinese else "No calendar events on this date.")
+        lines.append("这天没有日历事件。" if chinese else "No calendar events on this date.")
     if window_ended:
-        lines.append("這個時段已結束。" if chinese else "This window has ended.")
+        lines.append("这个时段已结束。" if chinese else "This window has ended.")
     elif not free and snapshot.events:
-        lines.append("這個時段已排滿。" if chinese else "This window is fully booked.")
-    lines.append("可用空檔：" if chinese else "Usable openings:")
+        lines.append("这个时段已排满。" if chinese else "This window is fully booked.")
+    lines.append("可用空档：" if chinese else "Usable openings:")
     lines.extend([span(left, right) for left, right in free] or [none])
     if schedule is not None:
-        lines.append(f"\n已安排 {schedule.used} 分鐘：" if chinese else f"\nAllocated {schedule.used} minutes:")
-        lines.extend([f"{span(left, right)}  {task_display(task, overdue)}"
+        lines.append(f"\n建议 {schedule.used} 分钟（未保存）：" if desktop else
+                     f"\n已安排 {schedule.used} 分钟：" if chinese else f"\nAllocated {schedule.used} minutes:")
+        lines.extend([f"{task_display(task, overdue)}\n  建议：{span(left, right)}" if desktop else
+                      f"{span(left, right)}  {task_display(task, overdue)}"
                       for task, left, right, overdue in schedule.placed] or [none])
         local_refresh = snapshot.refreshed.astimezone(snapshot.zone).replace(tzinfo=None)
         for label, tasks in (
             ("排不下：" if chinese else "Does not fit:", schedule.unscheduled),
-            ("待估時：" if chinese else "Needs an estimate:", schedule.unestimated),
+            ("待估时：" if chinese else "Needs an estimate:", schedule.unestimated),
         ):
             lines.append("\n" + label)
             lines.extend([task_display(task, deadline_order(task) < local_refresh) for task in tasks] or [none])

@@ -66,7 +66,7 @@ class MailRow:
     received: datetime | None
 
     def display(self) -> str:
-        stamp = self.received.strftime("%Y-%m-%d %H:%M %Z") if self.received else "Time unavailable"
+        stamp = self.received.strftime("%Y-%m-%d %H:%M %Z") if self.received else "时间不可用"
         return f"{stamp} | {self.sender} | {self.subject}"
 
 
@@ -80,7 +80,7 @@ class MailResult:
 def job_keywords(text: str) -> tuple[str, ...]:
     terms = tuple(dict.fromkeys(" ".join(part.split()) for part in re.split(r"[,，]", text) if part.strip()))
     if not 1 <= len(terms) <= 10 or any(not re.fullmatch(r"[\w -]{1,60}", term) for term in terms):
-        raise GmailError("Enter 1–10 comma-separated keywords or phrases (letters, digits, spaces, or hyphens).")
+        raise GmailError("请输入 1–10 个以逗号分隔的关键词或短语（字母、数字、空格或连字符）。")
     return terms
 
 
@@ -107,25 +107,25 @@ class GmailReader:
     def credentials(self, connect: bool) -> Credentials:
         if connect:
             if not self.client.is_file():
-                raise GmailError(r"Save the Desktop OAuth client as %LOCALAPPDATA%\Chihaya\google_calendar_client.json first.")
+                raise GmailError(r"请先将 Desktop OAuth 客户端保存为 %LOCALAPPDATA%\Chihaya\google_calendar_client.json。")
             config = json.loads(self.client.read_text(encoding="utf-8-sig"))
             installed = config.get("installed") if isinstance(config, dict) else None
             if (not isinstance(installed, dict) or installed.get("auth_uri") != AUTH_URI
                     or installed.get("token_uri") != TOKEN_URI):
-                raise GmailError("Gmail requires a Google OAuth client of type Desktop app.")
+                raise GmailError("Gmail 需要类型为 Desktop app 的 Google OAuth 客户端。")
             flow = DesktopFlow.from_client_config(config, scopes=[SCOPE], autogenerate_code_verifier=True)
             try:
                 creds = flow.run_local_server(
                     host="127.0.0.1", port=0, timeout_seconds=60, prompt="consent",
-                    authorization_prompt_message=None, success_message="Return to Chihaya to see the Gmail sign-in result.",
+                    authorization_prompt_message=None, success_message="请返回 Chihaya 查看 Gmail 登录结果。",
                 )
             except Warning as error:
                 if not hasattr(error, "old_scope"):
                     raise
-                raise ReconnectGmail("Gmail did not grant the requested read-only permission. Reconnect Gmail.") from None
+                raise ReconnectGmail("Gmail 未授予所请求的只读权限。请重新连接 Gmail。") from None
             granted = creds.granted_scopes if creds.granted_scopes is not None else creds.scopes
             if set(granted or ()) != {SCOPE}:
-                raise ReconnectGmail("Gmail did not grant exactly the requested read-only permission. Reconnect Gmail.")
+                raise ReconnectGmail("Gmail 授予的权限与所请求的只读权限不完全一致。请重新连接 Gmail。")
             return creds
         try:
             info = json.loads(self.token.read_text(encoding="utf-8"))
@@ -133,9 +133,9 @@ class GmailReader:
                 raise ValueError
             return Credentials.from_authorized_user_info(info, scopes=[SCOPE])
         except FileNotFoundError:
-            raise ReconnectGmail("Gmail is not connected. Choose Connect Gmail in Today.") from None
+            raise ReconnectGmail("尚未连接 Gmail。请到“设置”页连接 Gmail。") from None
         except (OSError, ValueError):
-            raise ReconnectGmail("Saved Gmail authorization could not be read. Reconnect Gmail.") from None
+            raise ReconnectGmail("无法读取已保存的 Gmail 授权。请重新连接 Gmail。") from None
 
     def _use(self, operation: Callable[[AuthorizedSession], T], *, connect: bool = False) -> T:
         try:
@@ -151,41 +151,41 @@ class GmailReader:
                 return result
         except RefreshError as error:
             if error.retryable:
-                raise GmailError("Gmail authorization could not refresh. Try again.") from None
-            raise ReconnectGmail("Gmail permission expired or was revoked. Reconnect Gmail.") from None
+                raise GmailError("Gmail 授权刷新失败。请重试。") from None
+            raise ReconnectGmail("Gmail 权限已过期或已被撤销。请重新连接 Gmail。") from None
         except OAuth2Error:
-            raise ReconnectGmail("Gmail sign-in was denied or incomplete. Reconnect Gmail.") from None
+            raise ReconnectGmail("Gmail 登录被拒绝或未完成。请重新连接 Gmail。") from None
         except WSGITimeoutError:
-            raise ReconnectGmail("Gmail sign-in timed out. Reconnect Gmail.") from None
+            raise ReconnectGmail("Gmail 登录已超时。请重新连接 Gmail。") from None
         except (RequestException, GoogleAuthError, TimeoutError):
-            raise GmailError("Could not reach Gmail. Check your connection and retry.") from None
+            raise GmailError("无法连接到 Gmail。请检查网络连接后重试。") from None
         except CalendarError as error:
             raise GmailError(str(error)) from None
         except (OSError, ValueError, KeyError, TypeError, OverflowError, AttributeError):
-            raise GmailError("Gmail data or sign-in configuration could not be read. Refresh or reconnect.") from None
+            raise GmailError("无法读取 Gmail 数据或登录配置。请刷新或重新连接。") from None
 
     @staticmethod
     def _get(session: AuthorizedSession, suffix: str = "", *, resource: str = "messages", **params: object) -> dict:
         response = session.get(f"{GMAIL}/{resource}{suffix}", params=params, timeout=TIMEOUT, allow_redirects=False)
         if response.status_code == 401:
-            raise ReconnectGmail("Gmail permission expired or was revoked. Reconnect Gmail.")
+            raise ReconnectGmail("Gmail 权限已过期或已被撤销。请重新连接 Gmail。")
         if response.status_code == 403:
             try:
                 reasons = {item.get("reason") for item in response.json().get("error", {}).get("errors", [])}
             except (ValueError, AttributeError, TypeError):
                 reasons = set()
             if reasons & {"accessNotConfigured", "serviceDisabled"}:
-                raise GmailError("Gmail API is not enabled for the OAuth project.")
+                raise GmailError("该 OAuth 项目尚未启用 Gmail API。")
             if reasons & {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}:
-                raise GmailError("Gmail rate or quota limit reached. Try again later.")
-            raise ReconnectGmail("Gmail access was denied. Reconnect Gmail or check account restrictions.")
+                raise GmailError("已达到 Gmail 的速率或配额上限。请稍后再试。")
+            raise ReconnectGmail("Gmail 访问被拒绝。请重新连接 Gmail，或检查账号限制。")
         if response.status_code == 404:
-            raise GmailItemMissing("The Gmail item is no longer available.")
+            raise GmailItemMissing("该 Gmail 项目已不可用。")
         if response.status_code != 200:
-            raise GmailError(f"Gmail returned HTTP {response.status_code}. Try refreshing.")
+            raise GmailError(f"Gmail 返回了 HTTP {response.status_code}。请尝试刷新。")
         payload = response.json()
         if not isinstance(payload, dict):
-            raise GmailError("Gmail returned an invalid response. Try refreshing.")
+            raise GmailError("Gmail 返回了无效的响应。请尝试刷新。")
         return payload
 
     def read(self, search: MailSearch, zone: ZoneInfo, *, connect: bool = False) -> MailResult:
@@ -206,8 +206,8 @@ class GmailReader:
                 received = received_time(data, zone)
                 if search.day is not None and received is not None and received.date() != search.day:
                     continue
-                sender = " ".join(headers.get("from", "").split()) or "(Unknown sender)"
-                subject = " ".join(headers.get("subject", "").split()) or "(No subject)"
+                sender = " ".join(headers.get("from", "").split()) or "（未知发件人）"
+                subject = " ".join(headers.get("subject", "").split()) or "（无主题）"
                 rows.append(MailRow(message_id, sender, subject, received))
             rows.sort(key=lambda row: row.received.timestamp() if row.received else float("-inf"), reverse=True)
             return MailResult(search, tuple(rows), bool(page.get("nextPageToken") or len(entries) > LIMIT))
@@ -218,7 +218,7 @@ class GmailReader:
                      content_limit: int = CONTENT_LIMIT, semantic: bool = True,
                      context: tuple[str, ...] = ()) -> MailScan:
         if not 2 <= candidate_limit <= 200 or not 1 <= content_limit <= candidate_limit:
-            raise GmailError("Gmail scan budgets must be 2–200 candidates and 1–candidate limit content checks.")
+            raise GmailError("Gmail 扫描预算必须为 2–200 个候选邮件，且内容检查数为 1 至候选上限。")
         classifier = LocalClassifier() if semantic else None
         context = tuple(title[:180] for title in context[:24])
 
@@ -337,7 +337,7 @@ class GmailReader:
                     failures += 1
             self.thread_cache = {ident: value for ident, value in self.thread_cache.items() if ident in candidates}
             if failures and not checked:
-                raise GmailError("Gmail scan failed before any thread could be checked. Refresh or reconnect.")
+                raise GmailError("Gmail 扫描在检查任何邮件会话之前就已失败。请刷新或重新连接。")
             return MailScan(today, len(candidates), capped, tuple(sorted(actions, key=action_order)), datetime.now(zone),
                             checked, candidate_limit, content_limit, len(chosen) < sum(map(len, metadata)),
                             failures, semantic)
@@ -350,7 +350,7 @@ class GmailReader:
         ident = latest["id"]
         headers = message_headers(latest.get("payload") or {})
         body = self._body(session, ident, excerpt_only=True)
-        actions = adjudicate(ident, headers.get("from", "(Unknown sender)"), headers.get("subject", "(No subject)"),
+        actions = adjudicate(ident, headers.get("from", "（未知发件人）"), headers.get("subject", "（无主题）"),
                              body, received_time(latest, zone), answered=False, direction_known=True,
                              context=context, classifier=classifier)
         # A short acknowledgement is not a new request or evidence of completion.
@@ -378,7 +378,7 @@ class GmailReader:
         return tuple(actions)
 
     def preview(self, message_id: str) -> str:
-        return self._use(lambda session: self._body(session, message_id) or "No displayable text body.")
+        return self._use(lambda session: self._body(session, message_id) or "没有可显示的文本正文。")
 
     def _body(self, session: AuthorizedSession, message_id: str, *, excerpt_only: bool = False) -> str:
         path = "/" + quote(message_id, safe="")

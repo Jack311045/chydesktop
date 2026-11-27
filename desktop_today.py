@@ -1,9 +1,9 @@
 from datetime import datetime, time, UTC
 
-from availability import openings, place_tasks
+from availability import openings, place_tasks, slot_intervals
 from calendar_reader import CalendarDay
 from daily_brief import word
-from tasks import Task, TaskStore, deadline_order, task_line
+from tasks import Task, TaskStore, deadline_order, task_fields, task_line
 
 
 def collect_reminders(store: TaskStore, now: datetime) -> int:
@@ -36,7 +36,7 @@ def briefing_text(now: datetime, tasks: list[Task], snapshot: CalendarDay | None
             labels.append(word("overdue" if deadline_order(task) < local_now else "due", lang))
         if task.planned_day == day:
             labels.append(word("planned", lang))
-        text.append(f"{' / '.join(labels)}: {task_line(task)}")
+        text.append(f"{' / '.join(labels)}: {task_fields(task).line() if lang in ('zh-Hant', 'zh-Hans') else task_line(task)}")
     if not due:
         text.append(word("no_tasks", lang))
     if len(due) > 3:
@@ -51,7 +51,7 @@ def briefing_text(now: datetime, tasks: list[Task], snapshot: CalendarDay | None
         text.append(f"{word('event', lang)}: {start_label} {event.title} ({event.calendar})")
     else:
         text.append(word("no_event" if snapshot.events else "empty_calendar", lang))
-    free = openings(snapshot, start, end, now)
+    free = openings(snapshot, start, end, now, slot_intervals(tasks, snapshot.day, snapshot.zone))
     if free:
         left, right = (value.astimezone(snapshot.zone) for value in free[0])
         text.append(f"{word('opening', lang)}: {left:%H:%M}–{right:%H:%M}")
